@@ -1,7 +1,8 @@
 import numpy as np
+import pandas as pd
 import streamlit as st
 
-from utils.calculations import bending_moment, sanitize_loads, shear_force
+from utils.calculations import bending_moment, reactions_for_simply_supported, sanitize_loads, shear_force
 from utils.plotting import draw_beam_schematic, plot_sfd_bmd
 from utils.report import append_progress_entry, calculate_grade_letter, generate_pdf_report, load_progress_for_student
 
@@ -11,15 +12,8 @@ st.markdown(
     """
     <style>
       .block-container {padding-top: 1rem; max-width: 1300px;}
-      .hero {
-        padding: 1rem 1.2rem; border-radius: 14px;
-        background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%);
-        color: #f8fafc; margin-bottom: 0.9rem;
-      }
-      .soft-card {
-        border: 1px solid rgba(148, 163, 184, 0.3);
-        border-radius: 12px; padding: .8rem 1rem; background: #ffffff;
-      }
+      .hero {padding: 1rem 1.2rem; border-radius: 14px; background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%); color: #f8fafc; margin-bottom: 0.9rem;}
+      .soft-card {border: 1px solid rgba(148, 163, 184, 0.3); border-radius: 12px; padding: .8rem 1rem; background: #ffffff;}
       .muted {color: #475569; font-size: .93rem;}
       .stMetric {border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 10px; padding: 0.45rem 0.6rem;}
       h2,h3 {letter-spacing: .2px;}
@@ -55,9 +49,9 @@ with left:
             a, b = st.columns([0.42, 0.58])
             ltype = a.selectbox("Type", ["point", "udl"], key=f"type_{i}")
             if ltype == "point":
-                P = b.number_input("Point load, P (kN)", min_value=0.0, value=10.0, key=f"P_{i}")
+                p = b.number_input("Point load, P (kN)", min_value=0.0, value=10.0, key=f"P_{i}")
                 x_pos = b.number_input("Location, x (m)", min_value=0.0, max_value=float(length), value=float(length / 2), key=f"a_{i}")
-                raw_loads.append({"type": "point", "P": P, "a": x_pos})
+                raw_loads.append({"type": "point", "P": p, "a": x_pos})
             else:
                 w = b.number_input("UDL intensity, w (kN/m)", min_value=0.0, value=5.0, key=f"w_{i}")
                 s_col, e_col = b.columns(2)
@@ -70,6 +64,10 @@ x = np.linspace(0, length, 500)
 V_custom = np.array([shear_force(xi, length, loads, support) for xi in x])
 M_custom = np.array([bending_moment(xi, length, loads, support) for xi in x])
 
+V_example, M_example = None, None
+max_V_error = rmse_V = max_M_error = rmse_M = 0.0
+example_choice = "None"
+
 with right:
     st.subheader("Live Summary")
     m1, m2 = st.columns(2)
@@ -79,6 +77,14 @@ with right:
     m3.metric("Load entries", len(loads))
     m4.metric("Beam support", support.replace("_", " ").title())
 
+    if support == "simply_supported":
+        r_left, r_right = reactions_for_simply_supported(length, loads)
+        st.markdown(f"**Support reactions:** R₁ = `{r_left:.3f} kN`, R₂ = `{r_right:.3f} kN`")
+    else:
+        fixed_shear = -float(V_custom[0])
+        fixed_moment = -float(M_custom[0])
+        st.markdown(f"**Fixed-end actions:** V₀ = `{fixed_shear:.3f} kN`, M₀ = `{fixed_moment:.3f} kNm`")
+
     st.markdown('<div class="soft-card"><div class="muted">Schematic preview updates instantly as you edit loads and support type.</div></div>', unsafe_allow_html=True)
     st.pyplot(draw_beam_schematic(length, loads, support), use_container_width=True)
 
@@ -87,6 +93,13 @@ analysis_tab, benchmark_tab, grading_tab = st.tabs(["Analysis", "Benchmark", "In
 with analysis_tab:
     st.subheader("Shear Force Diagram & Bending Moment Diagram")
     plot_sfd_bmd(x, V_custom, M_custom)
+
+    st.markdown("### Key stations (for teaching) ")
+    stations = sorted({0.0, float(length), *[ld.get("a", 0.0) for ld in loads if ld["type"] == "point"], *[ld.get("start", 0.0) for ld in loads if ld["type"] == "udl"], *[ld.get("end", 0.0) for ld in loads if ld["type"] == "udl"]})
+    rows = []
+    for sx in stations:
+        rows.append({"x (m)": round(sx, 3), "Shear V (kN)": round(float(shear_force(sx, length, loads, support)), 3), "Moment M (kNm)": round(float(bending_moment(sx, length, loads, support)), 3)})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 with benchmark_tab:
     st.subheader("Worked Example Comparison")
@@ -101,27 +114,26 @@ with benchmark_tab:
         ],
     )
 
-    V_example, M_example = None, None
     if example_choice != "None":
-        L = length
+        l = length
         if example_choice == "Simply Supported Beam with Point Load at Midspan":
-            P, a = 10.0, L / 2
-            R1 = P * (L - a) / L
-            V_example = np.array([R1 if xi < a else R1 - P for xi in x])
-            M_example = np.array([R1 * xi if xi < a else R1 * xi - P * (xi - a) for xi in x])
+            p, a = 10.0, l / 2
+            r1 = p * (l - a) / l
+            V_example = np.array([r1 if xi < a else r1 - p for xi in x])
+            M_example = np.array([r1 * xi if xi < a else r1 * xi - p * (xi - a) for xi in x])
         elif example_choice == "Simply Supported Beam with UDL across Full Span":
             w = 5.0
-            R1 = w * L / 2
-            V_example = np.array([R1 - w * xi for xi in x])
-            M_example = np.array([R1 * xi - (w * xi**2) / 2 for xi in x])
+            r1 = w * l / 2
+            V_example = np.array([r1 - w * xi for xi in x])
+            M_example = np.array([r1 * xi - (w * xi**2) / 2 for xi in x])
         elif example_choice == "Cantilever Beam with Point Load at Free End":
-            P = 12.0
-            V_example = np.full_like(x, -P)
-            M_example = np.array([-P * (L - xi) for xi in x])
+            p = 12.0
+            V_example = np.full_like(x, -p)
+            M_example = np.array([-p * (l - xi) for xi in x])
         elif example_choice == "Cantilever Beam with UDL across Full Span":
             w = 6.0
-            V_example = np.array([-w * (L - xi) for xi in x])
-            M_example = np.array([-(w * (L - xi) ** 2) / 2 for xi in x])
+            V_example = np.array([-w * (l - xi) for xi in x])
+            M_example = np.array([-(w * (l - xi) ** 2) / 2 for xi in x])
 
         plot_sfd_bmd(x, V_custom, M_custom, V_compare=V_example, M_compare=M_example)
 
@@ -131,8 +143,6 @@ with benchmark_tab:
         rmse_V = float(np.sqrt(np.mean(V_diff**2)))
         max_M_error = float(np.max(np.abs(M_diff)))
         rmse_M = float(np.sqrt(np.mean(M_diff**2)))
-    else:
-        max_V_error = rmse_V = max_M_error = rmse_M = 0.0
 
     e1, e2, e3, e4 = st.columns(4)
     e1.metric("Max Shear Error", f"{max_V_error:.3f} kN")
@@ -177,41 +187,15 @@ with grading_tab:
         cumulative_grade = calculate_grade_letter(cumulative_avg, grade_A, grade_B, grade_C, grade_D)
 
         pdf_bytes = generate_pdf_report(
-            student_name=student_name,
-            roll_no=roll_no,
-            semester=semester,
-            branch=branch,
-            course_info=course_info,
-            support=support,
-            length=length,
-            loads=loads,
-            x=x,
-            V_custom=V_custom,
-            M_custom=M_custom,
-            example_choice=example_choice if 'example_choice' in locals() else "None",
-            V_example=V_example if 'V_example' in locals() else None,
-            M_example=M_example if 'M_example' in locals() else None,
-            max_V_error=max_V_error if 'max_V_error' in locals() else 0.0,
-            rmse_V=rmse_V if 'rmse_V' in locals() else 0.0,
-            max_M_error=max_M_error if 'max_M_error' in locals() else 0.0,
-            rmse_M=rmse_M if 'rmse_M' in locals() else 0.0,
-            eq_score=eq_score,
-            diag_score=diag_score,
-            error_score=error_score,
-            presentation_score=presentation_score,
-            w_eq=w_eq,
-            w_diag=w_diag,
-            w_error=w_error,
-            w_pres=w_pres,
-            grade_A=grade_A,
-            grade_B=grade_B,
-            grade_C=grade_C,
-            grade_D=grade_D,
-            letter_grade=letter_grade,
-            instructor_notes=instructor_notes,
-            student_history=student_df,
-            cumulative_avg=cumulative_avg,
-            cumulative_grade=cumulative_grade,
+            student_name=student_name, roll_no=roll_no, semester=semester, branch=branch, course_info=course_info,
+            support=support, length=length, loads=loads, x=x, V_custom=V_custom, M_custom=M_custom,
+            example_choice=example_choice, V_example=V_example, M_example=M_example,
+            max_V_error=max_V_error, rmse_V=rmse_V, max_M_error=max_M_error, rmse_M=rmse_M,
+            eq_score=eq_score, diag_score=diag_score, error_score=error_score, presentation_score=presentation_score,
+            w_eq=w_eq, w_diag=w_diag, w_error=w_error, w_pres=w_pres,
+            grade_A=grade_A, grade_B=grade_B, grade_C=grade_C, grade_D=grade_D,
+            letter_grade=letter_grade, instructor_notes=instructor_notes,
+            student_history=student_df, cumulative_avg=cumulative_avg, cumulative_grade=cumulative_grade,
         )
 
         st.download_button("Download Report", data=pdf_bytes, file_name="beam_analysis_report.pdf", mime="application/pdf", use_container_width=True)
